@@ -1,0 +1,144 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String              @id @default(cuid())
+  email              String              @unique
+  passwordHash       String
+  name               String
+  role               String              @default("APPLICANT")
+  applications       Application[]
+  idempotencyRecords IdempotencyRecord[]
+  createdAt          DateTime            @default(now())
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key         String
+  operation   String
+  requestHash String
+  status      String   @default("IN_PROGRESS")
+  resultId    String?
+  createdAt   DateTime @default(now())
+
+  @@unique([userId, key, operation])
+  @@index([createdAt])
+}
+
+model Application {
+  id             String     @id @default(cuid())
+  applicationNo  String     @unique
+  status         String     @default("PENDING")
+  loanAmount     Float
+  loanTermMonths Int
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  applicant      Applicant?
+  documents      Document[]
+  income         Income?
+  decisions      Decision[]
+  audits         AuditLog[]
+  reviews        Review[]
+  idempotencyKey String?
+  requestHash    String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model Applicant {
+  id            String      @id @default(cuid())
+  applicationId String      @unique
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  fullName      String
+  email         String
+  phone         String?
+  dateOfBirth   String?
+  employment    String?
+}
+
+model Document {
+  id              String      @id @default(cuid())
+  applicationId   String
+  application     Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  originalName    String
+  storedName      String
+  mimeType        String
+  sizeBytes       Int
+  status          String      @default("UPLOADED")
+  extractedText   String?
+  extractedValues String?
+  extractionError String?
+  createdAt       DateTime    @default(now())
+}
+
+model Income {
+  id                 String      @id @default(cuid())
+  applicationId      String      @unique
+  application        Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  monthlyGross       Float?
+  monthlyNet         Float?
+  monthlyObligations Float?
+  employment         String?
+  incomeSource       String?
+  originalValues     String?
+  correctedValues    String?
+  evidence           String?
+  updatedAt          DateTime    @updatedAt
+}
+
+model EligibilityRule {
+  id        String     @id @default(cuid())
+  version   String     @unique
+  config    String
+  active    Boolean    @default(false)
+  createdAt DateTime   @default(now())
+  decisions Decision[]
+}
+
+model Decision {
+  id              String          @id @default(cuid())
+  applicationId   String
+  application     Application     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  outcome         String
+  dtiPercent      Float?
+  rulesTriggered  String
+  rulebookVersion String
+  rulebook        EligibilityRule @relation(fields: [rulebookVersion], references: [version])
+  explanation     String
+  createdAt       DateTime        @default(now())
+}
+
+model AuditLog {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  actorId       String?
+  action        String
+  details       String
+  createdAt     DateTime    @default(now())
+
+  @@index([applicationId, createdAt])
+}
+
+model Review {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  officerId     String
+  outcome       String
+  remarks       String
+  score         Int?
+  createdAt     DateTime    @default(now())
+}
