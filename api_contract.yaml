@@ -1,0 +1,1658 @@
+
+openapi: 3.0.3
+
+info:
+  title: BNK-02 - Loan Origination & Eligibility Assistant
+  description: |
+    Contract-first REST API for the BNK-02 Loan Origination &
+    Eligibility Assistant.
+
+    Core architecture:
+    - Node.js + Express: API gateway, authentication, authorization,
+      application management, orchestration and persistence.
+    - Python + FastAPI: AI document processing and LangGraph workflow.
+    - Docling/OCR: PDF text and document processing.
+    - Ollama: document information extraction and decision explanations.
+    - Pydantic: structured extraction validation.
+    - PostgreSQL: application, document, decision and audit persistence.
+
+    IMPORTANT:
+    The LLM is used only for information extraction and explanations.
+    Loan eligibility is calculated by a deterministic rule engine.
+    The LLM must never approve, reject or override a loan decision.
+
+    Supported documents:
+    - Identity proof: Aadhaar or PAN.
+    - Payslip: one month.
+    - Bank statement: one month.
+
+  version: 1.0.0
+  contact:
+    name: BNK-02 Development Team
+
+servers:
+  - url: http://localhost:3000/api
+    description: Local development server
+
+tags:
+  - name: Authentication
+  - name: Applications
+  - name: Documents
+  - name: AI Workflow
+  - name: Validation
+  - name: Eligibility
+  - name: Decisions
+  - name: Reviews
+  - name: Audit
+  - name: Rules
+  - name: Health
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # =====================================================
+  # AUTHENTICATION
+  # =====================================================
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate a user
+      description: Authenticate using email and password and return a JWT.
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get authenticated user details
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: Current user details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # =====================================================
+  # APPLICATIONS
+  # =====================================================
+
+  /applications:
+    get:
+      tags: [Applications]
+      summary: List applications accessible to the caller
+      description: |
+        Returns applications based on the authenticated user's role,
+        permissions and tenant scope. Supports filtering and pagination.
+      operationId: listApplications
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApplicationStatus'
+        - name: search
+          in: query
+          description: Search by application ID or applicant name.
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Application list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Applications]
+      summary: Create a loan application
+      description: Creates an application in DRAFT status.
+      operationId: createApplication
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApplicationRequest'
+      responses:
+        '201':
+          description: Application created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /applications/{applicationId}:
+    parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+
+    get:
+      tags: [Applications]
+      summary: Get application details
+      operationId: getApplication
+      responses:
+        '200':
+          description: Application details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Applications]
+      summary: Update application details
+      description: |
+        Updates editable application fields. Fields that have already
+        been used for a final decision require a new evaluation.
+      operationId: updateApplication
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateApplicationRequest'
+      responses:
+        '200':
+          description: Application updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /applications/{applicationId}/submit:
+    post:
+      tags: [Applications]
+      summary: Submit an application for document processing
+      description: |
+        Submits the application after the required applicant details
+        and documents have been provided.
+
+        The server verifies that the required document slots are present.
+        The document-processing workflow is started asynchronously.
+      operationId: submitApplication
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Application submitted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # =====================================================
+  # DOCUMENT UPLOAD AND MANAGEMENT
+  # =====================================================
+
+  /applications/{applicationId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+
+    get:
+      tags: [Documents]
+      summary: List application documents
+      operationId: listDocuments
+      responses:
+        '200':
+          description: Uploaded documents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Document'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags: [Documents]
+      summary: Upload an application document
+      description: |
+        Uploads one PDF document into a specific document slot.
+
+        Round 1 upload validation:
+        - Verify PDF extension, MIME type and PDF signature.
+        - Check file size and file integrity.
+        - Reject corrupted, encrypted or unsupported files.
+        - Inspect document content to identify its actual document type.
+        - Reject unrelated documents, such as a car image or resume
+          uploaded as a payslip.
+        - Verify that detected document type matches the selected slot.
+
+        Accepted documents are stored with UPLOADED status.
+        Detailed extraction and field validation happen in Round 2.
+      operationId: uploadDocument
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - documentType
+                - file
+              properties:
+                documentType:
+                  $ref: '#/components/schemas/DocumentType'
+                file:
+                  type: string
+                  format: binary
+                  description: PDF file, maximum 10 MB.
+      responses:
+        '201':
+          description: Document uploaded and passed Round 1 validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          description: File exceeds the upload size limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: Unsupported file type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Document failed Round 1 validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailureResponse'
+
+  /applications/{applicationId}/documents/{documentId}:
+    parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - $ref: '#/components/parameters/DocumentId'
+
+    get:
+      tags: [Documents]
+      summary: Get document details and validation status
+      operationId: getDocument
+      responses:
+        '200':
+          description: Document details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Documents]
+      summary: Delete an application document
+      description: |
+        Deletes an uploaded document only when application workflow
+        and retention rules permit deletion. The action is audited.
+      operationId: deleteDocument
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: Document deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # =====================================================
+  # AI WORKFLOW
+  # =====================================================
+
+  /applications/{applicationId}/workflow/run:
+    post:
+      tags: [AI Workflow]
+      summary: Start the document processing workflow
+      description: |
+        Starts the LangGraph workflow.
+
+        Workflow stages:
+        1. Retrieve uploaded documents.
+        2. Read digital PDF text or process scanned PDFs with OCR.
+        3. Extract required fields using Ollama.
+        4. Validate structured extraction using Pydantic.
+        5. Verify extracted values against source evidence.
+        6. Compare extracted values with manually entered values.
+        7. Perform cross-document validation.
+        8. Run deterministic eligibility evaluation.
+        9. Generate a decision explanation using Ollama.
+
+        The LLM does not calculate or decide eligibility.
+        Workflow execution is asynchronous to avoid long HTTP requests.
+      operationId: runApplicationWorkflow
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Workflow started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /applications/{applicationId}/workflow/status:
+    get:
+      tags: [AI Workflow]
+      summary: Get workflow execution status
+      operationId: getWorkflowStatus
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Current workflow status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowStatusResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /applications/{applicationId}/workflow/retry:
+    post:
+      tags: [AI Workflow]
+      summary: Retry a failed or reviewable workflow
+      description: |
+        Retries permitted workflow stages. Previously completed
+        stages should not be repeated unnecessarily.
+      operationId: retryWorkflow
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Workflow retry accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowAcceptedResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # =====================================================
+  # EXTRACTION AND VALIDATION
+  # =====================================================
+
+  /applications/{applicationId}/extractions:
+    get:
+      tags: [Validation]
+      summary: Get extracted document information
+      description: |
+        Returns extracted values and their source evidence.
+        Sensitive values should be masked according to user permissions.
+      operationId: getExtractions
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Extraction results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractionResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /applications/{applicationId}/validations:
+    get:
+      tags: [Validation]
+      summary: Get all application validation results
+      operationId: getValidations
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Validation results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationSummary'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /applications/{applicationId}/validations/reconcile:
+    post:
+      tags: [Validation]
+      summary: Run manual and extracted data reconciliation
+      description: |
+        Compares manually entered application details against
+        extracted document values.
+
+        Mismatches are recorded as discrepancies and may require
+        officer review. The system must preserve both original values.
+      operationId: reconcileApplicationData
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Reconciliation completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconciliationResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # =====================================================
+  # ELIGIBILITY
+  # =====================================================
+
+  /applications/{applicationId}/eligibility/evaluate:
+    post:
+      tags: [Eligibility]
+      summary: Evaluate loan eligibility
+      description: |
+        Runs the deterministic eligibility engine using validated
+        application and financial information.
+
+        Example factors:
+        - Monthly net income.
+        - Existing monthly obligations.
+        - Debt-to-income ratio (DTI).
+        - Requested loan amount.
+        - Loan term.
+        - Configured eligibility rules.
+
+        The result must be reproducible for the same input data
+        and rulebook version. An LLM cannot modify this result.
+      operationId: evaluateEligibility
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Eligibility evaluated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EligibilityResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /applications/{applicationId}/eligibility:
+    get:
+      tags: [Eligibility]
+      summary: Get eligibility calculation
+      operationId: getEligibility
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Eligibility details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EligibilityResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # =====================================================
+  # DECISIONS AND EXPLANATIONS
+  # =====================================================
+
+  /applications/{applicationId}/decision:
+    get:
+      tags: [Decisions]
+      summary: Get final eligibility decision
+      operationId: getDecision
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Decision details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /applications/{applicationId}/decision/explanation:
+    post:
+      tags: [Decisions]
+      summary: Generate decision explanation
+      description: |
+        Uses Ollama to generate a human-readable explanation
+        from an already calculated deterministic decision.
+
+        The explanation must accurately reflect the rule-engine
+        output and must not introduce new eligibility decisions.
+      operationId: generateDecisionExplanation
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Explanation generation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowAcceptedResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # =====================================================
+  # OFFICER REVIEW AND OVERRIDE
+  # =====================================================
+
+  /reviews:
+    get:
+      tags: [Reviews]
+      summary: List applications requiring officer review
+      description: Returns applications in NEEDS_REVIEW or REFER status.
+      operationId: listReviewQueue
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Review queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationListResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /applications/{applicationId}/reviews:
+    post:
+      tags: [Reviews]
+      summary: Submit an officer review
+      description: |
+        Records the officer's review, comments and resolution.
+        Only authorized loan officers or auditors may perform
+        actions allowed by their assigned permissions.
+      operationId: submitReview
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewRequest'
+      responses:
+        '201':
+          description: Review recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /applications/{applicationId}/decision/override:
+    post:
+      tags: [Reviews]
+      summary: Record an authorized decision override
+      description: |
+        Allows an authorized user to override a decision only
+        when permitted by the configured business policy.
+
+        Requires a reason and supporting comments.
+        Original engine decision is preserved.
+        Override is recorded separately in the audit history.
+        The LLM cannot perform this operation.
+      operationId: overrideDecision
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionOverrideRequest'
+      responses:
+        '200':
+          description: Decision override recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # =====================================================
+  # AUDIT HISTORY
+  # =====================================================
+
+  /applications/{applicationId}/audit:
+    get:
+      tags: [Audit]
+      summary: Get application audit history
+      description: |
+        Returns chronological events such as application creation,
+        document upload, validation, extraction, reconciliation,
+        eligibility evaluation, review and decision override.
+      operationId: getApplicationAudit
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Audit history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # =====================================================
+  # ELIGIBILITY RULES
+  # =====================================================
+
+  /rules:
+    get:
+      tags: [Rules]
+      summary: Get active eligibility rules
+      description: Returns the currently active rulebook and version.
+      operationId: getEligibilityRules
+      responses:
+        '200':
+          description: Active rules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RulebookResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # =====================================================
+  # HEALTH
+  # =====================================================
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Check API health
+      security: []
+      operationId: healthCheck
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: BNK-02 API
+                  timestamp:
+                    type: string
+                    format: date-time
+
+components:
+
+  # =====================================================
+  # SECURITY
+  # =====================================================
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # =====================================================
+  # PARAMETERS
+  # =====================================================
+
+  parameters:
+    ApplicationId:
+      name: applicationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Unique key for safe retry of state-changing requests.
+        Repeated requests with the same key and same payload
+        must not create duplicate operations.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+
+  # =====================================================
+  # SCHEMAS
+  # =====================================================
+
+  schemas:
+
+    # ---------------- AUTH ----------------
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          writeOnly: true
+
+    LoginResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: integer
+          example: 3600
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/UserRole'
+        tenantId:
+          type: string
+          format: uuid
+
+    UserRole:
+      type: string
+      enum:
+        - APPLICANT
+        - LOAN_OFFICER
+        - CREDIT_RISK
+        - AUDITOR
+        - ADMIN
+
+    # ---------------- APPLICATION ----------------
+
+    ApplicationStatus:
+      type: string
+      enum:
+        - DRAFT
+        - SUBMITTED
+        - PROCESSING
+        - NEEDS_REVIEW
+        - REFER
+        - ELIGIBLE
+        - APPROVED
+        - REJECTED
+        - FAILED
+
+    CreateApplicationRequest:
+      type: object
+      required:
+        - applicant
+        - loan
+      properties:
+        applicant:
+          $ref: '#/components/schemas/ApplicantInput'
+        loan:
+          $ref: '#/components/schemas/LoanInput'
+
+    UpdateApplicationRequest:
+      type: object
+      properties:
+        applicant:
+          $ref: '#/components/schemas/ApplicantInput'
+        loan:
+          $ref: '#/components/schemas/LoanInput'
+
+    ApplicantInput:
+      type: object
+      required:
+        - fullName
+        - dateOfBirth
+        - mobileNumber
+        - email
+      properties:
+        fullName:
+          type: string
+          minLength: 2
+          maxLength: 150
+        dateOfBirth:
+          type: string
+          format: date
+        mobileNumber:
+          type: string
+          pattern: '^[0-9]{10}$'
+        email:
+          type: string
+          format: email
+        address:
+          type: string
+          maxLength: 500
+        employmentType:
+          type: string
+          enum:
+            - SALARIED
+            - SELF_EMPLOYED
+            - OTHER
+        monthlyNetIncome:
+          type: number
+          minimum: 0
+        monthlyObligations:
+          type: number
+          minimum: 0
+
+    LoanInput:
+      type: object
+      required:
+        - amount
+        - termMonths
+      properties:
+        amount:
+          type: number
+          minimum: 1
+          description: Requested loan amount in INR.
+        termMonths:
+          type: integer
+          minimum: 1
+          maximum: 360
+        loanPurpose:
+          type: string
+          maxLength: 250
+
+    Application:
+      type: object
+      required:
+        - id
+        - applicant
+        - loan
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        applicant:
+          $ref: '#/components/schemas/ApplicantInput'
+        loan:
+          $ref: '#/components/schemas/LoanInput'
+        status:
+          $ref: '#/components/schemas/ApplicationStatus'
+        createdBy:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ApplicationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/Application'
+
+    ApplicationListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Application'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer
+
+    # ---------------- DOCUMENTS ----------------
+
+    DocumentType:
+      type: string
+      enum:
+        - ID_PROOF
+        - PAYSLIP
+        - BANK_STATEMENT
+
+    DocumentStatus:
+      type: string
+      enum:
+        - UPLOADED
+        - VALIDATING
+        - VALIDATED
+        - PROCESSING
+        - PROCESSED
+        - REJECTED
+        - NEEDS_REVIEW
+        - FAILED
+
+    Document:
+      type: object
+      required:
+        - id
+        - documentType
+        - status
+        - uploadedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentType:
+          $ref: '#/components/schemas/DocumentType'
+        detectedDocumentType:
+          $ref: '#/components/schemas/DocumentType'
+        originalFilename:
+          type: string
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+        status:
+          $ref: '#/components/schemas/DocumentStatus'
+        round1Status:
+          type: string
+          enum: [PASSED, FAILED, PENDING]
+        round2Status:
+          type: string
+          enum: [PASSED, FAILED, NEEDS_REVIEW, PENDING]
+        uploadedAt:
+          type: string
+          format: date-time
+
+    DocumentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/Document'
+        validation:
+          $ref: '#/components/schemas/ValidationResult'
+
+    # ---------------- WORKFLOW ----------------
+
+    WorkflowStatus:
+      type: string
+      enum:
+        - QUEUED
+        - RUNNING
+        - COMPLETED
+        - NEEDS_REVIEW
+        - FAILED
+
+    WorkflowAcceptedResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        workflowId:
+          type: string
+          format: uuid
+        applicationId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/WorkflowStatus'
+        message:
+          type: string
+
+    WorkflowStatusResponse:
+      type: object
+      properties:
+        workflowId:
+          type: string
+          format: uuid
+        applicationId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/WorkflowStatus'
+        currentStage:
+          type: string
+          example: CROSS_DOCUMENT_VALIDATION
+        completedStages:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+          nullable: true
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---------------- EXTRACTION ----------------
+
+    Evidence:
+      type: object
+      required: [source, quote]
+      properties:
+        source:
+          type: string
+          description: Source document identifier or name.
+        quote:
+          type: string
+          description: Exact supporting text from the source document.
+
+    ExtractedField:
+      type: object
+      properties:
+        value:
+          nullable: true
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        evidence:
+          $ref: '#/components/schemas/Evidence'
+
+    ExtractionResult:
+      type: object
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        documentType:
+          $ref: '#/components/schemas/DocumentType'
+        applicantName:
+          $ref: '#/components/schemas/ExtractedField'
+        employeeName:
+          $ref: '#/components/schemas/ExtractedField'
+        accountHolderName:
+          $ref: '#/components/schemas/ExtractedField'
+        grossIncome:
+          $ref: '#/components/schemas/ExtractedField'
+        netSalary:
+          $ref: '#/components/schemas/ExtractedField'
+        monthlyObligations:
+          $ref: '#/components/schemas/ExtractedField'
+        accountNumberMasked:
+          type: string
+          nullable: true
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankTransaction'
+        validationStatus:
+          type: string
+          enum: [VALIDATED, NEEDS_REVIEW, REJECTED]
+
+    BankTransaction:
+      type: object
+      properties:
+        transactionDate:
+          type: string
+          format: date
+        description:
+          type: string
+        amount:
+          type: number
+          minimum: 0
+        transactionType:
+          type: string
+          enum: [CREDIT, DEBIT]
+        evidence:
+          $ref: '#/components/schemas/Evidence'
+
+    ExtractionResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractionResult'
+
+    # ---------------- VALIDATION ----------------
+
+    ValidationResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [PASSED, FAILED, NEEDS_REVIEW, PENDING]
+        errors:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+
+    ValidationSummary:
+      type: object
+      properties:
+        applicationId:
+          type: string
+          format: uuid
+        round1:
+          $ref: '#/components/schemas/ValidationResult'
+        round2:
+          $ref: '#/components/schemas/ValidationResult'
+        evidenceValidation:
+          $ref: '#/components/schemas/ValidationResult'
+        manualReconciliation:
+          $ref: '#/components/schemas/ValidationResult'
+        crossDocumentValidation:
+          $ref: '#/components/schemas/ValidationResult'
+        overallStatus:
+          type: string
+          enum: [PASSED, FAILED, NEEDS_REVIEW, PENDING]
+
+    ValidationFailureResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: DOCUMENT_TYPE_MISMATCH
+        message:
+          type: string
+        validation:
+          $ref: '#/components/schemas/ValidationResult'
+
+    ReconciliationResponse:
+      type: object
+      properties:
+        applicationId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [MATCHED, DISCREPANCY_FOUND, NEEDS_REVIEW]
+        discrepancies:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              manualValue:
+                nullable: true
+              extractedValue:
+                nullable: true
+              sourceDocument:
+                type: string
+              status:
+                type: string
+                enum: [MATCHED, MISMATCH, MISSING]
+
+    # ---------------- ELIGIBILITY ----------------
+
+    EligibilityStatus:
+      type: string
+      enum:
+        - ELIGIBLE
+        - REFER
+        - DECLINED
+        - NEEDS_REVIEW
+        - PENDING
+
+    EligibilityResponse:
+      type: object
+      properties:
+        applicationId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/EligibilityStatus'
+        monthlyNetIncome:
+          type: number
+        monthlyObligations:
+          type: number
+        dti:
+          type: number
+          description: Debt-to-income ratio expressed as a percentage.
+        requestedLoanAmount:
+          type: number
+        termMonths:
+          type: integer
+        factors:
+          type: array
+          items:
+            type: object
+            properties:
+              ruleCode:
+                type: string
+              description:
+                type: string
+              actualValue:
+                type: string
+              expectedValue:
+                type: string
+              result:
+                type: string
+                enum: [PASS, FAIL, REFER]
+        rulebookVersion:
+          type: string
+        evaluatedAt:
+          type: string
+          format: date-time
+
+    # ---------------- DECISIONS ----------------
+
+    DecisionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        applicationId:
+          type: string
+          format: uuid
+        engineDecision:
+          $ref: '#/components/schemas/EligibilityStatus'
+        finalDecision:
+          $ref: '#/components/schemas/EligibilityStatus'
+        explanation:
+          type: string
+          nullable: true
+        explanationStatus:
+          type: string
+          enum: [PENDING, GENERATED, FAILED]
+        rulebookVersion:
+          type: string
+        overridden:
+          type: boolean
+        overrideReason:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    # ---------------- REVIEWS ----------------
+
+    ReviewRequest:
+      type: object
+      required: [action, comments]
+      properties:
+        action:
+          type: string
+          enum:
+            - RESOLVE_DISCREPANCY
+            - REQUEST_DOCUMENTS
+            - CONFIRM_DOCUMENTS
+            - ESCALATE
+            - CLOSE_REVIEW
+        comments:
+          type: string
+          minLength: 3
+          maxLength: 2000
+        resolution:
+          type: string
+          maxLength: 2000
+
+    ReviewResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        applicationId:
+          type: string
+          format: uuid
+        reviewedBy:
+          type: string
+          format: uuid
+        action:
+          type: string
+        comments:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    DecisionOverrideRequest:
+      type: object
+      required: [newDecision, reason, comments]
+      properties:
+        newDecision:
+          type: string
+          enum: [ELIGIBLE, REFER, DECLINED]
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+        comments:
+          type: string
+          minLength: 3
+          maxLength: 2000
+
+    # ---------------- AUDIT ----------------
+
+    AuditResponse:
+      type: object
+      properties:
+        applicationId:
+          type: string
+          format: uuid
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              eventType:
+                type: string
+                example: DOCUMENT_UPLOADED
+              actorId:
+                type: string
+                format: uuid
+              actorRole:
+                $ref: '#/components/schemas/UserRole'
+              description:
+                type: string
+              metadata:
+                type: object
+                additionalProperties: true
+              timestamp:
+                type: string
+                format: date-time
+
+    # ---------------- RULEBOOK ----------------
+
+    RulebookResponse:
+      type: object
+      properties:
+        version:
+          type: string
+        effectiveFrom:
+          type: string
+          format: date-time
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              ruleCode:
+                type: string
+              description:
+                type: string
+              operator:
+                type: string
+              threshold:
+                type: number
+              outcome:
+                type: string
+
+    # ---------------- ERRORS ----------------
+
+    ErrorResponse:
+      type: object
+      required: [success, code, message]
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          example: Request validation failed.
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
+        requestId:
+          type: string
+
+  # =====================================================
+  # STANDARD RESPONSES
+  # =====================================================
+
+  responses:
+    BadRequest:
+      description: Invalid request or validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Missing, invalid or expired JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: User does not have permission to access this resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Requested resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Conflict:
+      description: Conflicting state or duplicate operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

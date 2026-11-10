@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+backend/uploads/
+backend/prisma/*.db
+aiservices/.venv/
+aiservices/**/__pycache__/
+aiservices/.pytest_cache/
+aiservices/state/
+frontend/dist/
+frontend/coverage/
